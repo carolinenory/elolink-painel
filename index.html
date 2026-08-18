@@ -434,6 +434,26 @@ var STATUS_META = {
    painel administrativo — assim o cliente nunca vê a área da Social Media. */
 var CLIENT_ONLY = false;
 
+/* ============================= SUPABASE (link online do cliente) ============================= */
+var SUPABASE_URL = "https://jjjzsxqcroooetjsytqj.supabase.co";
+var SUPABASE_ANON_KEY = "sb_publishable_Py3NhbICZR_utTVkPfTe5A_Lzr1n7Zp";
+function sbRpc(fn, params){
+  return fetch(SUPABASE_URL+"/rest/v1/rpc/"+fn, {
+    method: "POST",
+    headers: { "Content-Type":"application/json", "apikey": SUPABASE_ANON_KEY },
+    body: JSON.stringify(params||{})
+  }).then(function(r){
+    return r.text().then(function(t){
+      var data = null;
+      try { data = t ? JSON.parse(t) : null; } catch(e){ data = null; }
+      return { ok: r.ok, status: r.status, data: data, raw: t };
+    });
+  });
+}
+function getUrlToken(){
+  try { var u = new URL(window.location.href); return u.searchParams.get("portal"); } catch(e){ return null; }
+}
+
 /* ============================= STATE ============================= */
 var STATE = {
   mode: "admin",
@@ -564,7 +584,7 @@ function commentThreadHtml(content, author, inputId){
 /* ============================= RENDER DISPATCH ============================= */
 function render(){
   var root = document.getElementById("root");
-  root.innerHTML = STATE.mode === "admin" ? renderAdmin() : renderClientPortal();
+  root.innerHTML = STATE.mode === "admin" ? renderAdmin() : (STATE.mode === "cliente-online" ? renderClienteOnline() : renderClientPortal());
 }
 
 /* ============================= NAV ============================= */
@@ -591,7 +611,7 @@ function filteredContents(){
 }
 
 /* ============================= ACTIONS ============================= */
-function setView(v){ STATE.view=v; STATE.navOpen=false; render(); }
+function setView(v){ STATE.view=v; STATE.navOpen=false; render(); if (v==="cliente-link" && ADMIN_SHARE.projetoId && ADMIN_SHARE.senha){ onlineLoadDecisoes(); } }
 function toggleNav(v){ STATE.navOpen = (v!==undefined) ? v : !STATE.navOpen; render(); }
 function setFilter(k,v){ STATE.filters[k]=v; render(); }
 function clearFilters(){ STATE.filters={status:"Todos",format:"Todos",pillar:"Todos"}; render(); }
@@ -1030,6 +1050,8 @@ function clienteLinkHtml(){
     '<button class="btn btn-ghost" onclick="goClientPortal()">Pré-visualizar</button></div>';
   html += '</div>';
 
+  html += onlineShareCardHtml();
+
   html += '<div class="card" style="padding:20px;margin-bottom:16px;">';
   html += '<div class="field-label" style="margin-bottom:6px;">⬆️ Quer um link https:// em vez de um arquivo? Publique no GitHub Pages</div>';
   html += '<ol style="font-size:13px;color:var(--ink-soft);line-height:1.7;margin:0 0 12px;padding-left:18px;">'+
@@ -1047,6 +1069,390 @@ function clienteLinkHtml(){
     avatarHtml(56,true)+
     '<div style="font-weight:700;margin-top:10px;">Olá! Confira os conteúdos preparados para sua marca.</div>'+
     '<div style="font-size:12px;color:var(--ink-faint);margin-top:4px;">Clique para abrir a visão completa do cliente →</div></div>';
+  html += '</div>';
+  return html;
+}
+
+/* ============================= LINK ONLINE COM SENHA (ADMIN) ============================= */
+var ADMIN_SHARE = {
+  senha: (function(){ try { return localStorage.getItem("elolink_admin_senha") || ""; } catch(e){ return ""; } })(),
+  projetoId: (function(){ try { return localStorage.getItem("elolink_projeto_id") || null; } catch(e){ return null; } })(),
+  link: (function(){ try { return JSON.parse(localStorage.getItem("elolink_share_link") || "null"); } catch(e){ return null; } })(),
+  decisoes: [],
+  carregando: false,
+  erro: null,
+};
+
+function adminAskSenha(){
+  var s = window.prompt("Digite a senha administrativa do painel (a mesma configurada no banco de dados):");
+  if (s){ ADMIN_SHARE.senha = s; try { localStorage.setItem("elolink_admin_senha", s); } catch(e){} }
+  return s;
+}
+function adminEnsureSenha(){
+  if (ADMIN_SHARE.senha) return Promise.resolve(ADMIN_SHARE.senha);
+  return Promise.resolve(adminAskSenha());
+}
+function adminEnsureProjeto(){
+  return adminEnsureSenha().then(function(senha){
+    if (!senha) return Promise.reject("sem_senha");
+    if (ADMIN_SHARE.projetoId) return ADMIN_SHARE.projetoId;
+    return sbRpc("admin_listar_projetos", { p_senha: senha }).then(function(res){
+      if (!res.ok) return Promise.reject(res.data);
+      var lista = res.data || [];
+      if (lista.length > 0){
+        ADMIN_SHARE.projetoId = lista[0].id;
+        try { localStorage.setItem("elolink_projeto_id", ADMIN_SHARE.projetoId); } catch(e){}
+        return ADMIN_SHARE.projetoId;
+      }
+      return sbRpc("admin_salvar_projeto", { p_senha: senha, p_id: null, p_nome: STATE.client.name, p_cliente_nome: STATE.client.name }).then(function(res2){
+        if (!res2.ok) return Promise.reject(res2.data);
+        ADMIN_SHARE.projetoId = res2.data.id;
+        try { localStorage.setItem("elolink_projeto_id", ADMIN_SHARE.projetoId); } catch(e){}
+        return ADMIN_SHARE.projetoId;
+      });
+    });
+  });
+}
+function adminSyncContents(projetoId, senha){
+  return sbRpc("admin_listar_conteudos", { p_senha: senha, p_projeto_id: projetoId }).then(function(res){
+    if (!res.ok) return Promise.reject(res.data);
+    if ((res.data||[]).length > 0) return res.data;
+    var tasks = STATE.contents.map(function(c){
+      var opt = (c.options && c.options[0]) || {};
+      return sbRpc("admin_salvar_conteudo", {
+        p_senha: senha, p_id: null, p_projeto_id: projetoId,
+        p_titulo: c.title, p_formato: c.format, p_pilar: c.pillar, p_objetivo: c.objective,
+        p_data_publicacao: c.date, p_status: c.status, p_capa: c.cover, p_legenda: c.caption,
+        p_cta: c.cta, p_hashtags: c.hashtags,
+        p_roteiro_hook: opt.hook, p_roteiro_desenvolvimento: opt.development, p_roteiro_cta: opt.cta,
+        p_direcao_visual: opt.visual_direction, p_texto_tela: opt.on_screen_text, p_observacoes: opt.notes
+      });
+    });
+    return Promise.all(tasks);
+  });
+}
+function onlineShareCriar(){
+  ADMIN_SHARE.erro = null; ADMIN_SHARE.carregando = true; render();
+  adminEnsureProjeto().then(function(projetoId){
+    return adminSyncContents(projetoId, ADMIN_SHARE.senha).then(function(){
+      var senhaCliente = Math.random().toString(36).slice(2,8).toUpperCase();
+      return sbRpc("admin_criar_share_link", { p_senha: ADMIN_SHARE.senha, p_projeto_id: projetoId, p_senha_cliente: senhaCliente }).then(function(res){
+        if (!res.ok) return Promise.reject(res.data);
+        var token = res.data;
+        var url = window.location.origin + window.location.pathname + "?portal=" + token;
+        ADMIN_SHARE.link = { token: token, senha: senhaCliente, url: url };
+        try { localStorage.setItem("elolink_share_link", JSON.stringify(ADMIN_SHARE.link)); } catch(e){}
+        pushToast("Link do cliente criado!", "🔗");
+      });
+    });
+  }).catch(function(){
+    ADMIN_SHARE.erro = "Não foi possível criar o link. Verifique a senha administrativa e tente novamente.";
+    pushToast("Erro ao criar o link do cliente.", "⚠️");
+  }).then(function(){
+    ADMIN_SHARE.carregando = false;
+    render();
+  });
+}
+function adminGetCurrentLinkId(){
+  return sbRpc("admin_listar_links", { p_senha: ADMIN_SHARE.senha, p_projeto_id: ADMIN_SHARE.projetoId }).then(function(res){
+    if (!res.ok) return Promise.reject(res.data);
+    var row = (res.data||[]).find(function(r){ return r.token === ADMIN_SHARE.link.token; });
+    return row ? row.id : null;
+  });
+}
+function onlineShareRegenerar(){
+  if (!ADMIN_SHARE.link) return;
+  ADMIN_SHARE.carregando = true; render();
+  adminGetCurrentLinkId().then(function(id){
+    if (!id) return Promise.reject("nao_encontrado");
+    return sbRpc("admin_regenerar_link", { p_senha: ADMIN_SHARE.senha, p_share_link_id: id }).then(function(res){
+      if (!res.ok) return Promise.reject(res.data);
+      var token = res.data;
+      var url = window.location.origin + window.location.pathname + "?portal=" + token;
+      ADMIN_SHARE.link = Object.assign({}, ADMIN_SHARE.link, { token: token, url: url });
+      try { localStorage.setItem("elolink_share_link", JSON.stringify(ADMIN_SHARE.link)); } catch(e){}
+      pushToast("Link renovado! O link antigo não funciona mais.", "🔁");
+    });
+  }).catch(function(){
+    pushToast("Não foi possível renovar o link.", "⚠️");
+  }).then(function(){
+    ADMIN_SHARE.carregando = false;
+    render();
+  });
+}
+function onlineShareTrocarSenha(){
+  if (!ADMIN_SHARE.link) return;
+  var nova = window.prompt("Digite a nova senha para o cliente (deixe em branco para gerar automaticamente):");
+  if (nova === null) return;
+  if (!nova) nova = Math.random().toString(36).slice(2,8).toUpperCase();
+  ADMIN_SHARE.carregando = true; render();
+  adminGetCurrentLinkId().then(function(id){
+    if (!id) return Promise.reject("nao_encontrado");
+    return sbRpc("admin_trocar_senha_link", { p_senha: ADMIN_SHARE.senha, p_share_link_id: id, p_senha_cliente_nova: nova }).then(function(res){
+      if (!res.ok) return Promise.reject(res.data);
+      ADMIN_SHARE.link = Object.assign({}, ADMIN_SHARE.link, { senha: nova });
+      try { localStorage.setItem("elolink_share_link", JSON.stringify(ADMIN_SHARE.link)); } catch(e){}
+      pushToast("Senha do cliente atualizada!", "🔑");
+    });
+  }).catch(function(){
+    pushToast("Não foi possível trocar a senha.", "⚠️");
+  }).then(function(){
+    ADMIN_SHARE.carregando = false;
+    render();
+  });
+}
+function onlineShareDesativar(){
+  if (!ADMIN_SHARE.link) return;
+  if (!window.confirm("Desativar o acesso do cliente a este link? Ele vai deixar de funcionar imediatamente.")) return;
+  ADMIN_SHARE.carregando = true; render();
+  adminGetCurrentLinkId().then(function(id){
+    if (!id) return Promise.reject("nao_encontrado");
+    return sbRpc("admin_desativar_link", { p_senha: ADMIN_SHARE.senha, p_share_link_id: id });
+  }).then(function(){
+    ADMIN_SHARE.link = null;
+    try { localStorage.removeItem("elolink_share_link"); } catch(e){}
+    pushToast("Acesso do cliente desativado.", "⛔");
+  }).catch(function(){
+    pushToast("Não foi possível desativar o acesso.", "⚠️");
+  }).then(function(){
+    ADMIN_SHARE.carregando = false;
+    render();
+  });
+}
+function onlineLoadDecisoes(){
+  if (!ADMIN_SHARE.projetoId || !ADMIN_SHARE.senha) return;
+  sbRpc("admin_listar_decisoes", { p_senha: ADMIN_SHARE.senha, p_projeto_id: ADMIN_SHARE.projetoId }).then(function(res){
+    if (res.ok){ ADMIN_SHARE.decisoes = res.data || []; render(); }
+  });
+}
+function onlineShareCardHtml(){
+  var html = '<div class="card" style="padding:20px;margin-bottom:16px;">';
+  html += '<div class="field-label" style="margin-bottom:6px;">🔗 Link online com senha (recomendado)</div>';
+  html += '<p style="font-size:13px;color:var(--ink-soft);line-height:1.5;margin:0 0 14px;">Gera um link https:// de verdade, protegido por senha, hospedado no banco de dados (Supabase). O cliente acessa de qualquer lugar, aprova ou pede alteração, e a decisão aparece aqui no painel automaticamente — sem precisar baixar arquivo nenhum.</p>';
+  if (!ADMIN_SHARE.link){
+    html += '<button class="btn btn-primary" onclick="onlineShareCriar()" '+(ADMIN_SHARE.carregando?'disabled':'')+'>'+(ADMIN_SHARE.carregando?'Gerando...':'🔗 Criar link para o cliente')+'</button>';
+  } else {
+    html += '<div style="display:flex;flex-direction:column;gap:8px;">';
+    html += '<div><div class="field-label" style="margin-bottom:4px;">Link</div><div style="display:flex;gap:6px;"><input class="plain-input" readonly value="'+esc(ADMIN_SHARE.link.url)+'" style="font-size:12px;" onclick="this.select()" /><button class="btn btn-ghost" onclick="copyTextToClipboard('+JSON.stringify(ADMIN_SHARE.link.url)+',\'Link copiado!\')">Copiar</button></div></div>';
+    html += '<div><div class="field-label" style="margin-bottom:4px;">Senha do cliente</div><div style="display:flex;gap:6px;"><input class="plain-input" readonly value="'+esc(ADMIN_SHARE.link.senha)+'" style="font-size:12px;font-weight:700;" onclick="this.select()" /><button class="btn btn-ghost" onclick="copyTextToClipboard('+JSON.stringify(ADMIN_SHARE.link.senha)+',\'Senha copiada!\')">Copiar</button></div></div>';
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">'+
+      '<button class="btn btn-ghost" onclick="onlineShareTrocarSenha()">🔑 Trocar senha</button>'+
+      '<button class="btn btn-ghost" onclick="onlineShareRegenerar()">🔁 Gerar novo link</button>'+
+      '<button class="btn btn-ghost" style="color:#b91c1c;" onclick="onlineShareDesativar()">⛔ Desativar acesso</button>'+
+    '</div>';
+    html += '</div>';
+  }
+  if (ADMIN_SHARE.erro){ html += '<div style="font-size:12px;color:#b91c1c;margin-top:10px;">'+esc(ADMIN_SHARE.erro)+'</div>'; }
+  html += '</div>';
+
+  if (ADMIN_SHARE.projetoId){
+    html += '<div class="card" style="padding:20px;margin-bottom:16px;">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;"><div class="field-label" style="margin:0;">📋 Decisões do cliente</div><button onclick="onlineLoadDecisoes()" style="background:none;border:none;font-size:12px;color:var(--brand);font-weight:700;">Atualizar</button></div>';
+    if (ADMIN_SHARE.decisoes.length===0){
+      html += '<p style="font-size:13px;color:var(--ink-faint);margin:0;">Nenhuma decisão recebida ainda.</p>';
+    } else {
+      html += '<div style="display:flex;flex-direction:column;gap:8px;">';
+      ADMIN_SHARE.decisoes.forEach(function(d){
+        var rotulo = d.tipo==="aprovado" ? "✅ Aprovado" : (d.tipo==="alteracao" ? "↻ Alteração solicitada" : "✕ Reprovado");
+        html += '<div style="font-size:13px;border-bottom:1px solid var(--line);padding-bottom:8px;"><b>'+esc(d.conteudo_titulo||"")+'</b> — '+rotulo+
+          (d.comentario ? '<div style="color:var(--ink-soft);font-style:italic;">"'+esc(d.comentario)+'"</div>' : '')+
+          '<div style="font-size:11px;color:var(--ink-faint);">'+esc(d.created_at)+'</div></div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  return html;
+}
+
+/* ============================= PORTAL DO CLIENTE ONLINE (com senha, via Supabase) ============================= */
+var ONLINE = {
+  token: null,
+  senha: null,
+  carregando: false,
+  erro: null,
+  projeto: null,
+  conteudos: [],
+  shareLinkId: null,
+  activeId: null,
+  confirmApprove: false,
+  showChangeForm: false,
+  showRejectForm: false,
+};
+function onlineTryAutoLogin(){
+  var token = getUrlToken();
+  if (!token) return;
+  ONLINE.token = token;
+  STATE.mode = "cliente-online";
+  var saved = null;
+  try { saved = JSON.parse(localStorage.getItem("elolink_cliente_sessao_"+token) || "null"); } catch(e){}
+  if (saved && saved.senha){
+    onlineLogin(token, saved.senha, true);
+  } else {
+    render();
+  }
+}
+function onlineLogin(token, senha, silencioso){
+  ONLINE.carregando = true; ONLINE.erro = null;
+  if (!silencioso) render();
+  sbRpc("cliente_validar_acesso", { p_token: token, p_senha: senha }).then(function(res){
+    ONLINE.carregando = false;
+    if (res.data && res.data.ok){
+      ONLINE.token = token; ONLINE.senha = senha;
+      ONLINE.projeto = res.data.projeto;
+      ONLINE.conteudos = res.data.conteudos || [];
+      ONLINE.shareLinkId = res.data.share_link_id;
+      ONLINE.erro = null;
+      try { localStorage.setItem("elolink_cliente_sessao_"+token, JSON.stringify({ senha: senha })); } catch(e){}
+    } else {
+      var codigo = res.data && res.data.erro;
+      if (codigo === "bloqueado") ONLINE.erro = "Muitas tentativas com senha errada. Tente novamente em alguns minutos.";
+      else if (codigo === "senha_incorreta") ONLINE.erro = "Senha incorreta.";
+      else if (codigo === "link_invalido") ONLINE.erro = "Este link não é válido ou foi desativado.";
+      else ONLINE.erro = "Não foi possível acessar agora. Tente novamente.";
+      if (silencioso){ try { localStorage.removeItem("elolink_cliente_sessao_"+token); } catch(e){} }
+    }
+    render();
+  }).catch(function(){
+    ONLINE.carregando = false;
+    ONLINE.erro = "Erro de conexão. Verifique sua internet e tente novamente.";
+    render();
+  });
+}
+function onlineSubmitPassword(){
+  var el = document.getElementById("online-pw-input");
+  if (!el || !el.value) return;
+  onlineLogin(ONLINE.token, el.value, false);
+}
+function onlineOpenPost(id){ ONLINE.activeId=id; ONLINE.confirmApprove=false; ONLINE.showChangeForm=false; ONLINE.showRejectForm=false; render(); }
+function onlineClosePost(){ ONLINE.activeId=null; render(); }
+function onlineOpenApprove(){ ONLINE.confirmApprove=true; render(); }
+function onlineCancelApprove(){ ONLINE.confirmApprove=false; render(); }
+function onlineOpenChangeForm(){ ONLINE.showChangeForm=true; render(); }
+function onlineCancelChangeForm(){ ONLINE.showChangeForm=false; render(); }
+function onlineOpenRejectForm(){ ONLINE.showRejectForm=true; render(); }
+function onlineCancelRejectForm(){ ONLINE.showRejectForm=false; render(); }
+function onlineDecidir(id, tipo, comentario){
+  sbRpc("cliente_registrar_decisao", { p_token: ONLINE.token, p_senha: ONLINE.senha, p_conteudo_id: id, p_tipo: tipo, p_comentario: comentario||null }).then(function(res){
+    if (res.data && res.data.ok){
+      ONLINE.confirmApprove = false; ONLINE.showChangeForm = false; ONLINE.showRejectForm = false;
+      pushToast(tipo==="aprovado" ? "Conteúdo aprovado!" : (tipo==="alteracao" ? "Alteração solicitada." : "Conteúdo reprovado."), tipo==="aprovado" ? "✓" : "📨");
+      onlineLogin(ONLINE.token, ONLINE.senha, true);
+    } else {
+      pushToast("Não foi possível registrar sua decisão. Tente novamente.", "⚠️");
+    }
+  });
+}
+function onlineConfirmApprove(id){ onlineDecidir(id, "aprovado", ""); }
+function onlineSubmitChange(id){
+  var el = document.getElementById("online-change-text");
+  var t = el && el.value.trim();
+  if (!t) return;
+  onlineDecidir(id, "alteracao", t);
+}
+function onlineSubmitReject(id){
+  var el = document.getElementById("online-reject-text");
+  var t = el && el.value.trim();
+  if (!t) return;
+  onlineDecidir(id, "reprovado", t);
+}
+function onlineCheckChangeText(){ var el=document.getElementById("online-change-text"); var b=document.getElementById("online-change-submit-btn"); if (b) b.disabled = !(el && el.value.trim()); }
+function onlineCheckRejectText(){ var el=document.getElementById("online-reject-text"); var b=document.getElementById("online-reject-submit-btn"); if (b) b.disabled = !(el && el.value.trim()); }
+
+function renderClienteOnline(){
+  if (!ONLINE.projeto){ return renderOnlinePasswordGate(); }
+  return renderOnlinePortal();
+}
+function renderOnlinePasswordGate(){
+  var html = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);padding:20px;">';
+  html += '<div class="card pop-in" style="max-width:380px;width:100%;padding:28px;text-align:center;">';
+  html += avatarHtml(64,true);
+  html += '<h2 style="font-size:18px;font-weight:800;margin:14px 0 4px;">Acesso do Cliente</h2>';
+  html += '<p style="font-size:13px;color:var(--ink-soft);margin:0 0 18px;">Digite a senha que a ELOLINK te enviou para ver os conteúdos preparados.</p>';
+  html += '<input id="online-pw-input" type="password" class="plain-input" placeholder="Senha de acesso" onkeydown="if(event.key===\'Enter\')onlineSubmitPassword()" style="text-align:center;margin-bottom:10px;" />';
+  if (ONLINE.erro){ html += '<div style="font-size:12px;color:#b91c1c;margin-bottom:10px;">'+esc(ONLINE.erro)+'</div>'; }
+  html += '<button class="btn btn-primary" style="width:100%;" onclick="onlineSubmitPassword()" '+(ONLINE.carregando?'disabled':'')+'>'+(ONLINE.carregando?'Verificando...':'Entrar')+'</button>';
+  html += '</div></div>';
+  return html;
+}
+function renderOnlinePortal(){
+  var p = ONLINE.projeto;
+  var html = '<div style="min-height:100vh;background:var(--bg);">';
+  html += '<div style="position:sticky;top:0;z-index:20;background:rgba(255,255,255,.9);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:8px;">'+avatarHtml(30,false)+'<span style="font-weight:700;font-size:14px;">ELOLINK · Portal do Cliente</span></div>';
+  html += '<div style="max-width:720px;margin:0 auto;padding:32px 20px;display:flex;flex-direction:column;gap:28px;">';
+  html += '<div style="text-align:center;display:flex;flex-direction:column;align-items:center;gap:10px;" class="pop-in">'+avatarHtml(72,true)+
+    '<h1 style="font-size:19px;font-weight:800;margin:0;">Olá'+(p && p.cliente_nome ? ", "+esc(p.cliente_nome) : "")+'! Confira os conteúdos preparados para sua marca.</h1>'+
+    '<p style="font-size:14px;color:var(--ink-soft);margin:0;">Revise o roteiro e aprove com apenas um clique.</p></div>';
+
+  html += '<div><h2 style="font-size:16px;font-weight:800;margin:0 0 12px;">Planejamento do mês</h2><div style="display:flex;flex-direction:column;gap:10px;">';
+  var sorted = ONLINE.conteudos.slice().sort(function(a,b){ return (a.data_publicacao||"").localeCompare(b.data_publicacao||""); });
+  if (sorted.length===0){ html += '<p style="font-size:14px;color:var(--ink-faint);">Nenhum conteúdo cadastrado ainda.</p>'; }
+  sorted.forEach(function(c2){
+    html += '<div class="card row-hover" style="padding:10px;display:flex;align-items:center;gap:12px;cursor:pointer;" onclick="onlineOpenPost('+JSON.stringify(c2.id)+')">'+
+      '<div class="grad-1" style="width:56px;height:56px;border-radius:12px;flex-shrink:0;"></div>'+
+      '<div style="flex:1;min-width:0;"><div style="font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+esc(c2.titulo||"(sem título)")+'</div>'+
+      '<div style="font-size:12px;color:var(--ink-faint);">'+esc(c2.formato||"")+(c2.data_publicacao?' · '+fmtDate(c2.data_publicacao):'')+'</div></div>'+
+      statusBadgeHtml(c2.status,"sm")+'</div>';
+  });
+  html += '</div></div>';
+
+  var active = ONLINE.activeId ? ONLINE.conteudos.find(function(c){ return c.id===ONLINE.activeId; }) : null;
+  if (active){ html += onlinePostModalHtml(active); }
+  html += toastHostHtml();
+  html += '</div></div>';
+  return html;
+}
+function onlinePostModalHtml(c){
+  var alreadyDecided = (c.status==="Aprovado" || c.status==="Reprovado");
+  var html = '<div class="modal-overlay" onmousedown="if(event.target===event.currentTarget)onlineClosePost()"><div class="modal-box wide pop-in">';
+  html += '<div class="modal-head"><div><h3 style="margin:0;font-size:18px;">'+esc(c.titulo||"")+'</h3></div><button class="modal-close" onclick="onlineClosePost()">✕</button></div>';
+  html += '<div class="modal-body"><div class="two-col">';
+  html += '<div class="col-left" style="padding:22px;display:flex;flex-direction:column;gap:14px;">';
+  html += '<div class="grad-1" style="width:100%;aspect-ratio:1/1;border-radius:14px;"></div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'+
+    fieldHtml("Formato", c.formato)+fieldHtml("Data prevista", c.data_publicacao?fmtDate(c.data_publicacao):"-")+
+    fieldHtml("Objetivo", c.objetivo)+fieldHtmlRaw("Status", statusBadgeHtml(c.status,"sm"))+'</div>';
+  html += fieldHtml("Legenda", c.legenda);
+  html += '</div>';
+  html += '<div style="padding:22px;display:flex;flex-direction:column;gap:14px;">';
+  html += '<p style="font-size:14px;color:var(--ink-soft);margin:0;">Este é o roteiro preparado para este conteúdo.</p>';
+  html += fieldHtml("Hook / Gancho", c.roteiro_hook);
+  html += fieldHtml("Desenvolvimento", c.roteiro_desenvolvimento);
+  html += fieldHtml("CTA", c.roteiro_cta);
+  html += fieldHtml("Orientação visual", c.direcao_visual);
+  html += fieldHtml("Texto na tela", c.texto_tela);
+  if (!alreadyDecided){
+    html += '<div style="padding-top:10px;border-top:1px solid var(--line);"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">'+
+      '<button class="btn btn-emerald" onclick="onlineOpenApprove()">✓ Aprovar</button>'+
+      '<button class="btn btn-amber" onclick="onlineOpenChangeForm()">↻ Alterar</button>'+
+      '<button class="btn btn-rose" onclick="onlineOpenRejectForm()">✕ Reprovar</button></div></div>';
+  } else {
+    html += '<div style="padding-top:10px;border-top:1px solid var(--line);">'+statusBadgeHtml(c.status)+'</div>';
+  }
+  html += '</div></div></div>';
+
+  if (ONLINE.confirmApprove){
+    html += '<div class="modal-overlay"><div class="modal-box pop-in"><div style="padding:26px;text-align:center;display:flex;flex-direction:column;gap:14px;align-items:center;">'+
+      '<div style="font-size:32px;">✅</div><h4 style="margin:0;font-size:17px;font-weight:800;">Você deseja aprovar este conteúdo?</h4>'+
+      '<div style="display:flex;gap:8px;"><button class="btn btn-ghost" onclick="onlineCancelApprove()">Cancelar</button><button class="btn btn-emerald" onclick="onlineConfirmApprove('+JSON.stringify(c.id)+')">Confirmar aprovação</button></div>'+
+    '</div></div></div>';
+  }
+  if (ONLINE.showChangeForm){
+    html += '<div class="modal-overlay"><div class="modal-box pop-in"><div style="padding:22px;display:flex;flex-direction:column;gap:10px;">'+
+      '<h4 style="margin:0;font-size:16px;font-weight:800;">O que você gostaria que fosse alterado?</h4>'+
+      '<textarea id="online-change-text" class="plain-input" rows="4" placeholder="Descreva a alteração desejada..." oninput="onlineCheckChangeText()"></textarea>'+
+      '<div style="display:flex;justify-content:flex-end;gap:8px;"><button class="btn btn-ghost" onclick="onlineCancelChangeForm()">Cancelar</button>'+
+      '<button id="online-change-submit-btn" class="btn btn-amber" disabled onclick="onlineSubmitChange('+JSON.stringify(c.id)+')">Enviar solicitação</button></div>'+
+    '</div></div></div>';
+  }
+  if (ONLINE.showRejectForm){
+    html += '<div class="modal-overlay"><div class="modal-box pop-in"><div style="padding:22px;display:flex;flex-direction:column;gap:10px;">'+
+      '<h4 style="margin:0;font-size:16px;font-weight:800;">Tem certeza que deseja reprovar este conteúdo?</h4>'+
+      '<textarea id="online-reject-text" class="plain-input" rows="3" placeholder="Conte o motivo da reprovação..." oninput="onlineCheckRejectText()"></textarea>'+
+      '<div style="display:flex;justify-content:flex-end;gap:8px;"><button class="btn btn-ghost" onclick="onlineCancelRejectForm()">Cancelar</button>'+
+      '<button id="online-reject-submit-btn" class="btn btn-rose" disabled onclick="onlineSubmitReject('+JSON.stringify(c.id)+')">Confirmar reprovação</button></div>'+
+    '</div></div></div>';
+  }
   html += '</div>';
   return html;
 }
@@ -1221,7 +1627,11 @@ function clientPostModalHtml(content){
 }
 
 if (CLIENT_ONLY) { STATE.mode = "client"; }
-render();
+if (!CLIENT_ONLY && getUrlToken()) {
+  onlineTryAutoLogin();
+} else {
+  render();
+}
 </script>
 </body>
 </html>
