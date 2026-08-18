@@ -437,17 +437,26 @@ var CLIENT_ONLY = false;
 /* ============================= SUPABASE (link online do cliente) ============================= */
 var SUPABASE_URL = "https://jjjzsxqcroooetjsytqj.supabase.co";
 var SUPABASE_ANON_KEY = "sb_publishable_Py3NhbICZR_utTVkPfTe5A_Lzr1n7Zp";
-function sbRpc(fn, params){
+function sbRpc(fn, params, timeoutMs){
+  timeoutMs = timeoutMs || 20000;
+  var controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  var didTimeout = false;
+  var timer = controller ? setTimeout(function(){ didTimeout = true; controller.abort(); }, timeoutMs) : null;
   return fetch(SUPABASE_URL+"/rest/v1/rpc/"+fn, {
     method: "POST",
     headers: { "Content-Type":"application/json", "apikey": SUPABASE_ANON_KEY },
-    body: JSON.stringify(params||{})
+    body: JSON.stringify(params||{}),
+    signal: controller ? controller.signal : undefined
   }).then(function(r){
+    if (timer) clearTimeout(timer);
     return r.text().then(function(t){
       var data = null;
       try { data = t ? JSON.parse(t) : null; } catch(e){ data = null; }
       return { ok: r.ok, status: r.status, data: data, raw: t };
     });
+  }).catch(function(err){
+    if (timer) clearTimeout(timer);
+    return { ok: false, status: 0, data: null, raw: String(err), timeout: didTimeout };
   });
 }
 function getUrlToken(){
@@ -1127,7 +1136,7 @@ function adminEnsureProjeto(){
     if (!senha) return Promise.reject("sem_senha");
     if (ADMIN_SHARE.projetoId) return ADMIN_SHARE.projetoId;
     return sbRpc("admin_listar_projetos", { p_senha: senha }).then(function(res){
-      if (!res.ok) return Promise.reject(res.data);
+      if (!res.ok) return Promise.reject(res);
       var lista = res.data || [];
       if (lista.length > 0){
         ADMIN_SHARE.projetoId = lista[0].id;
@@ -1135,7 +1144,7 @@ function adminEnsureProjeto(){
         return ADMIN_SHARE.projetoId;
       }
       return sbRpc("admin_salvar_projeto", { p_senha: senha, p_id: null, p_nome: STATE.client.name, p_cliente_nome: STATE.client.name }).then(function(res2){
-        if (!res2.ok) return Promise.reject(res2.data);
+        if (!res2.ok) return Promise.reject(res2);
         ADMIN_SHARE.projetoId = res2.data.id;
         try { localStorage.setItem("elolink_projeto_id", ADMIN_SHARE.projetoId); } catch(e){}
         return ADMIN_SHARE.projetoId;
@@ -1145,7 +1154,7 @@ function adminEnsureProjeto(){
 }
 function adminSyncContents(projetoId, senha){
   return sbRpc("admin_listar_conteudos", { p_senha: senha, p_projeto_id: projetoId }).then(function(res){
-    if (!res.ok) return Promise.reject(res.data);
+    if (!res.ok) return Promise.reject(res);
     if ((res.data||[]).length > 0) return res.data;
     var tasks = STATE.contents.map(function(c){
       var opt = (c.options && c.options[0]) || {};
@@ -1167,7 +1176,7 @@ function onlineShareCriar(){
     return adminSyncContents(projetoId, ADMIN_SHARE.senha).then(function(){
       var senhaCliente = Math.random().toString(36).slice(2,8).toUpperCase();
       return sbRpc("admin_criar_share_link", { p_senha: ADMIN_SHARE.senha, p_projeto_id: projetoId, p_senha_cliente: senhaCliente }).then(function(res){
-        if (!res.ok) return Promise.reject(res.data);
+        if (!res.ok) return Promise.reject(res);
         var token = res.data;
         var url = window.location.origin + window.location.pathname + "?portal=" + token;
         ADMIN_SHARE.link = { token: token, senha: senhaCliente, url: url };
@@ -1175,8 +1184,16 @@ function onlineShareCriar(){
         pushToast("Link do cliente criado!", "🔗");
       });
     });
-  }).catch(function(){
-    ADMIN_SHARE.erro = "Não foi possível criar o link. Verifique a senha administrativa e tente novamente.";
+  }).catch(function(err){
+    if (err === "sem_senha"){
+      ADMIN_SHARE.erro = "Não foi possível criar o link. Verifique a senha administrativa e tente novamente.";
+    } else if (err && err.timeout){
+      ADMIN_SHARE.erro = "Isso demorou mais do que o esperado (a internet pode estar instável ou o banco de dados demorou para responder). Espere um minuto e tente de novo.";
+      try { ADMIN_SHARE.senha = ""; localStorage.removeItem("elolink_admin_senha"); } catch(e){}
+    } else {
+      ADMIN_SHARE.erro = "Não foi possível criar o link. Verifique a senha administrativa e tente novamente.";
+      try { ADMIN_SHARE.senha = ""; localStorage.removeItem("elolink_admin_senha"); } catch(e){}
+    }
     pushToast("Erro ao criar o link do cliente.", "⚠️");
   }).then(function(){
     ADMIN_SHARE.carregando = false;
@@ -1185,7 +1202,7 @@ function onlineShareCriar(){
 }
 function adminGetCurrentLinkId(){
   return sbRpc("admin_listar_links", { p_senha: ADMIN_SHARE.senha, p_projeto_id: ADMIN_SHARE.projetoId }).then(function(res){
-    if (!res.ok) return Promise.reject(res.data);
+    if (!res.ok) return Promise.reject(res);
     var row = (res.data||[]).find(function(r){ return r.token === ADMIN_SHARE.link.token; });
     return row ? row.id : null;
   });
@@ -1196,7 +1213,7 @@ function onlineShareRegenerar(){
   adminGetCurrentLinkId().then(function(id){
     if (!id) return Promise.reject("nao_encontrado");
     return sbRpc("admin_regenerar_link", { p_senha: ADMIN_SHARE.senha, p_share_link_id: id }).then(function(res){
-      if (!res.ok) return Promise.reject(res.data);
+      if (!res.ok) return Promise.reject(res);
       var token = res.data;
       var url = window.location.origin + window.location.pathname + "?portal=" + token;
       ADMIN_SHARE.link = Object.assign({}, ADMIN_SHARE.link, { token: token, url: url });
@@ -1225,7 +1242,7 @@ function onlineShareTrocarSenhaConfirmar(){
   adminGetCurrentLinkId().then(function(id){
     if (!id) return Promise.reject("nao_encontrado");
     return sbRpc("admin_trocar_senha_link", { p_senha: ADMIN_SHARE.senha, p_share_link_id: id, p_senha_cliente_nova: nova }).then(function(res){
-      if (!res.ok) return Promise.reject(res.data);
+      if (!res.ok) return Promise.reject(res);
       ADMIN_SHARE.link = Object.assign({}, ADMIN_SHARE.link, { senha: nova });
       try { localStorage.setItem("elolink_share_link", JSON.stringify(ADMIN_SHARE.link)); } catch(e){}
       pushToast("Senha do cliente atualizada!", "🔑");
