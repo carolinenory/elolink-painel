@@ -783,6 +783,9 @@ function renderAdmin(){
 
   if (STATE.activePostId){ html += adminPostModalHtml(findContent(STATE.activePostId)); }
   if (STATE.showNewContent){ html += newContentModalHtml(); }
+  if (ADMIN_SHARE.showSenhaModal){ html += adminSenhaModalHtml(); }
+  if (ADMIN_SHARE.showTrocarSenhaModal){ html += trocarSenhaModalHtml(); }
+  if (ADMIN_SHARE.showDesativarModal){ html += desativarModalHtml(); }
   html += toastHostHtml();
   return html;
 }
@@ -1083,14 +1086,41 @@ var ADMIN_SHARE = {
   erro: null,
 };
 
-function adminAskSenha(){
-  var s = window.prompt("Digite a senha administrativa do painel (a mesma configurada no banco de dados):");
-  if (s){ ADMIN_SHARE.senha = s; try { localStorage.setItem("elolink_admin_senha", s); } catch(e){} }
-  return s;
-}
 function adminEnsureSenha(){
   if (ADMIN_SHARE.senha) return Promise.resolve(ADMIN_SHARE.senha);
-  return Promise.resolve(adminAskSenha());
+  return new Promise(function(resolve){
+    ADMIN_SHARE.showSenhaModal = true;
+    ADMIN_SHARE._resolveSenhaModal = resolve;
+    render();
+    setTimeout(function(){ var el = document.getElementById("admin-senha-input"); if (el) el.focus(); }, 30);
+  });
+}
+function adminSenhaModalSubmit(){
+  var el = document.getElementById("admin-senha-input");
+  var v = el && el.value;
+  if (!v) return;
+  ADMIN_SHARE.senha = v;
+  try { localStorage.setItem("elolink_admin_senha", v); } catch(e){}
+  ADMIN_SHARE.showSenhaModal = false;
+  var resolve = ADMIN_SHARE._resolveSenhaModal;
+  ADMIN_SHARE._resolveSenhaModal = null;
+  render();
+  if (resolve) resolve(v);
+}
+function adminSenhaModalCancel(){
+  ADMIN_SHARE.showSenhaModal = false;
+  var resolve = ADMIN_SHARE._resolveSenhaModal;
+  ADMIN_SHARE._resolveSenhaModal = null;
+  render();
+  if (resolve) resolve(null);
+}
+function adminSenhaModalHtml(){
+  return '<div class="modal-overlay" onmousedown="if(event.target===event.currentTarget)adminSenhaModalCancel()"><div class="modal-box pop-in" style="max-width:360px;"><div style="padding:22px;display:flex;flex-direction:column;gap:12px;">'+
+    '<h4 style="margin:0;font-size:16px;font-weight:800;">Senha administrativa</h4>'+
+    '<p style="font-size:13px;color:var(--ink-soft);margin:0;">Digite a senha administrativa do painel (a mesma configurada no banco de dados) para continuar.</p>'+
+    '<input id="admin-senha-input" type="password" class="plain-input" placeholder="Senha administrativa" onkeydown="if(event.key===\'Enter\'){event.preventDefault();adminSenhaModalSubmit();}" />'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px;"><button class="btn btn-ghost" onclick="adminSenhaModalCancel()">Cancelar</button><button class="btn btn-primary" onclick="adminSenhaModalSubmit()">Confirmar</button></div>'+
+  '</div></div></div>';
 }
 function adminEnsureProjeto(){
   return adminEnsureSenha().then(function(senha){
@@ -1182,9 +1212,15 @@ function onlineShareRegenerar(){
 }
 function onlineShareTrocarSenha(){
   if (!ADMIN_SHARE.link) return;
-  var nova = window.prompt("Digite a nova senha para o cliente (deixe em branco para gerar automaticamente):");
-  if (nova === null) return;
-  if (!nova) nova = Math.random().toString(36).slice(2,8).toUpperCase();
+  ADMIN_SHARE.showTrocarSenhaModal = true;
+  ADMIN_SHARE.trocarSenhaValor = Math.random().toString(36).slice(2,8).toUpperCase();
+  render();
+}
+function onlineShareTrocarSenhaCancelar(){ ADMIN_SHARE.showTrocarSenhaModal = false; render(); }
+function onlineShareTrocarSenhaConfirmar(){
+  var el = document.getElementById("trocar-senha-input");
+  var nova = (el && el.value.trim()) || ADMIN_SHARE.trocarSenhaValor;
+  ADMIN_SHARE.showTrocarSenhaModal = false;
   ADMIN_SHARE.carregando = true; render();
   adminGetCurrentLinkId().then(function(id){
     if (!id) return Promise.reject("nao_encontrado");
@@ -1201,9 +1237,22 @@ function onlineShareTrocarSenha(){
     render();
   });
 }
+function trocarSenhaModalHtml(){
+  return '<div class="modal-overlay" onmousedown="if(event.target===event.currentTarget)onlineShareTrocarSenhaCancelar()"><div class="modal-box pop-in" style="max-width:360px;"><div style="padding:22px;display:flex;flex-direction:column;gap:12px;">'+
+    '<h4 style="margin:0;font-size:16px;font-weight:800;">Trocar senha do cliente</h4>'+
+    '<p style="font-size:13px;color:var(--ink-soft);margin:0;">Pode editar o campo abaixo, ou deixar a senha sugerida:</p>'+
+    '<input id="trocar-senha-input" class="plain-input" value="'+esc(ADMIN_SHARE.trocarSenhaValor)+'" onkeydown="if(event.key===\'Enter\'){event.preventDefault();onlineShareTrocarSenhaConfirmar();}" />'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px;"><button class="btn btn-ghost" onclick="onlineShareTrocarSenhaCancelar()">Cancelar</button><button class="btn btn-primary" onclick="onlineShareTrocarSenhaConfirmar()">Confirmar</button></div>'+
+  '</div></div></div>';
+}
 function onlineShareDesativar(){
   if (!ADMIN_SHARE.link) return;
-  if (!window.confirm("Desativar o acesso do cliente a este link? Ele vai deixar de funcionar imediatamente.")) return;
+  ADMIN_SHARE.showDesativarModal = true;
+  render();
+}
+function onlineShareDesativarCancelar(){ ADMIN_SHARE.showDesativarModal = false; render(); }
+function onlineShareDesativarConfirmar(){
+  ADMIN_SHARE.showDesativarModal = false;
   ADMIN_SHARE.carregando = true; render();
   adminGetCurrentLinkId().then(function(id){
     if (!id) return Promise.reject("nao_encontrado");
@@ -1218,6 +1267,13 @@ function onlineShareDesativar(){
     ADMIN_SHARE.carregando = false;
     render();
   });
+}
+function desativarModalHtml(){
+  return '<div class="modal-overlay" onmousedown="if(event.target===event.currentTarget)onlineShareDesativarCancelar()"><div class="modal-box pop-in" style="max-width:360px;"><div style="padding:22px;display:flex;flex-direction:column;gap:12px;">'+
+    '<h4 style="margin:0;font-size:16px;font-weight:800;">Desativar acesso do cliente?</h4>'+
+    '<p style="font-size:13px;color:var(--ink-soft);margin:0;">O link vai deixar de funcionar imediatamente. Você pode criar um novo depois.</p>'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px;"><button class="btn btn-ghost" onclick="onlineShareDesativarCancelar()">Cancelar</button><button class="btn btn-primary" style="background:#b91c1c;" onclick="onlineShareDesativarConfirmar()">Desativar</button></div>'+
+  '</div></div></div>';
 }
 function onlineLoadDecisoes(){
   if (!ADMIN_SHARE.projetoId || !ADMIN_SHARE.senha) return;
