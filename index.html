@@ -1422,10 +1422,15 @@ function onlineLogin(token, senha, silencioso){
       try { localStorage.setItem("elolink_cliente_sessao_"+token, JSON.stringify({ senha: senha })); } catch(e){}
     } else {
       var codigo = res.data && res.data.erro;
-      if (codigo === "bloqueado") ONLINE.erro = "Muitas tentativas com senha errada. Tente novamente em alguns minutos.";
-      else if (codigo === "senha_incorreta") ONLINE.erro = "Senha incorreta.";
-      else if (codigo === "link_invalido") ONLINE.erro = "Este link não é válido ou foi desativado.";
-      else ONLINE.erro = "Não foi possível acessar agora. Tente novamente.";
+      /* Se essa tentativa foi automática (login silencioso com uma senha antiga guardada */
+      /* no navegador), não mostramos erro nenhum — só voltamos para a tela de senha limpa. */
+      /* Erro só aparece quando a pessoa realmente digitou e confirmou uma senha errada. */
+      if (!silencioso){
+        if (codigo === "bloqueado") ONLINE.erro = "Muitas tentativas com senha errada. Tente novamente em alguns minutos.";
+        else if (codigo === "senha_incorreta") ONLINE.erro = "Senha incorreta.";
+        else if (codigo === "link_invalido") ONLINE.erro = "Este link não é válido ou foi desativado.";
+        else ONLINE.erro = "Não foi possível acessar agora. Tente novamente.";
+      }
       if (silencioso){ try { localStorage.removeItem("elolink_cliente_sessao_"+token); } catch(e){} }
     }
     render();
