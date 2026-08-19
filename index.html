@@ -673,12 +673,53 @@ function downloadClientPortal(){
   }
 }
 
+/* ============================= SINCRONIZAÇÃO AUTOMÁTICA COM O BANCO (SUPABASE) ============================= */
+/* Sempre que um conteúdo é criado ou muda de status por aqui, mandamos a mesma informação */
+/* para o banco de dados, para que o link do cliente já mostre a versão mais recente. */
+function syncContentToSupabase(c){
+  if (!c) return Promise.resolve();
+  return adminEnsureProjeto().then(function(projetoId){
+    var opt = (c.options && c.options[0]) || {};
+    var payload = {
+      p_senha: ADMIN_SHARE.senha,
+      p_id: c.supabase_id || null,
+      p_projeto_id: projetoId,
+      p_titulo: c.title, p_formato: c.format, p_pilar: c.pillar, p_objetivo: c.objective,
+      p_data_publicacao: c.date, p_status: c.status, p_capa: c.cover, p_legenda: c.caption,
+      p_cta: c.cta, p_hashtags: c.hashtags,
+      p_roteiro_hook: opt.hook, p_roteiro_desenvolvimento: opt.development, p_roteiro_cta: opt.cta,
+      p_direcao_visual: opt.visual_direction, p_texto_tela: opt.on_screen_text, p_observacoes: opt.notes
+    };
+    function save(){
+      return sbRpc("admin_salvar_conteudo", payload).then(function(res){
+        if (!res.ok) return Promise.reject(res);
+        c.supabase_id = res.data.id;
+      });
+    }
+    if (c.supabase_id) return save();
+    /* Primeira vez sincronizando este conteúdo: verifica se ele já existe no banco */
+    /* (evita duplicar os conteúdos que já foram enviados antes) antes de criar um novo. */
+    return sbRpc("admin_listar_conteudos", { p_senha: ADMIN_SHARE.senha, p_projeto_id: projetoId }).then(function(res){
+      if (res.ok){
+        var found = (res.data||[]).find(function(row){ return row.titulo === c.title; });
+        if (found){ c.supabase_id = found.id; payload.p_id = found.id; }
+      }
+      return save();
+    });
+  }).catch(function(err){
+    if (err !== "sem_senha"){
+      pushToast("Essa alteração ficou salva aqui, mas não deu para sincronizar com o link do cliente agora. Tente novamente em instantes.", "⚠️");
+    }
+  });
+}
 function changeStatus(id, status){
   var c = findContent(id); c.status=status; render();
+  syncContentToSupabase(c);
 }
 function sendToApproval(id){
   var c = findContent(id); c.status="Aguardando aprovação"; render();
   pushToast("Conteúdo enviado para aprovação do cliente.","📨");
+  syncContentToSupabase(c);
 }
 function sendComment(id, inputId, author){
   var el = document.getElementById(inputId);
@@ -712,6 +753,7 @@ function saveNewContent(){
   STATE.showNewContent=false;
   render();
   pushToast("Conteúdo criado.","✨");
+  syncContentToSupabase(newContent);
 }
 
 /* client portal actions */
